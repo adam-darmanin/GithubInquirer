@@ -1,0 +1,14 @@
+{
+  "name": "githubinquirer",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node ./bin/www"
+  },
+  "dependencies": {
+    "comma-separated-values": "^3.6.4",
+    "debug": "~2.6.9",
+    "octonode": "^0.9.5",
+    "parse-github-url": "^1.0.2"
+  }
+}

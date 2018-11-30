@@ -1,0 +1,4 @@
+node_modules
+*.iml
+*.csv
+.idea
