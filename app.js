@@ -2,87 +2,88 @@
  * Module dependencies.
  */
 const github = require('octonode');
+const GH_BW_PAUSE_PERIOD = 2000; // Pause period not to abuse GH's bandwith.
 const gh = require('parse-github-url');
 const fs = require('fs');
 const CSV = require("comma-separated-values");
+const TECH = {
+    JS: 'javascript',
+    JAVA: 'java',
+    CS: 'c#',
+    CPP: 'cpp'
+}
 
-var client = github.client('TOKEN HERE');
+console.log('Starting UT PR Review poller');
+
+// This search is done using UnitTetService Account GH token.
+var client = github.client('fdcbd0435b4c31526ab727311f1609396c2fe2a1');
 client.get('/user', {}, (err, status, body, headers) => {
-  if (err) {
-    console.log(err, status, body, headers);
-  }
+    if (err) {
+        console.log(err, status, body, headers);
+    }
 });
 
 var ghsearch = client.search();
 
 fs.writeFile('prs.csv', 'Repo, PR, insight, Assignee, Adjustments,\n',
     (err) => {
-      if (err) {
-        throw err;
-      }
+        if (err) {
+            throw err;
+        }
     });
 
-findManualAutofix(1);
+findOpenPrForTestReview(1);
 
-//closePR();
 
-function closePR() {
-  fs.readFile('timeout-prs.csv', 'utf8', (err, data) => {
-    if (err) {
-      throw err;
-    }
-    var parsed = new CSV(data, {header: true}).parse();
-
-    for (var i = 0; i < parsed.length; i++) {
-      var repo = parsed[i].repo;
-      var pr = parsed[i].pr;
-      var ghpr = client.pr(repo, pr).conditional('ETAG');
-
-      console.log(ghpr)
-
-      var prIssue = client.issue(repo, pr);
-      prIssue.createComment({
+function createUTReviewComment() {
+    prIssue.createComment({
         body: 'Closing because of CodeCleanup timeout'
-      }, (err, data, headers) => {
+    }, (err, data, headers) => {
         if (err) {
-          throw err;
+            throw err;
         }
-      });
-
-      ghpr.close((err, data, headers) => {
-        if (err) {
-          throw err;
-        }
-      }); //pull request
-    }
-
-  });
-
+    });
 }
 
 /**
  * Paginate all queries.
+ * <b>NB</b>: Takes a pause not to abuse the GH server bandwidth. If GH detects abuse
+ * it will blacklist the connection for a time-period.
+ *
+ * @param prURL Starting from 1. Will paginate with the GH server.
  */
-function findManualAutofix(page) {
-  ghsearch.issues({
-    page: page,
-    per_page: 100,
-    q: 'is:pr head:CodeFix- label:AUTOFIX-CC-APPROVED updated:2018-12-17..2018-12-23',
-    sort: 'created'
-  }, (err, data, headers) => {
-    if (err) {
-      throw err;
-    }
-    if (data.items.length > 0) {
-      for (var i = 0; i < data.items.length; i++) {
-        var issue = data.items[i];
-        processPRfromIssue(issue.html_url);
-      }
+function findOpenPrForTestReview(page) {
+    ghsearch.issues({
+        page: page,
+        per_page: 100,
+        q: 'is:pr updated:2019-10-22..2019-10-23 user:trilogy-group',
+        sort: 'created'
+    }, (err, data, headers) => {
+        if (err) {
+            throw err;
+        }
+        if (data.items.length > 0) {
+            for (var i = 0; i < data.items.length; i++) {
+                var issue = data.items[i];
+                processPRfromIssue(issue.html_url);
+            }
 
-      findManualAutofix(page + 1);
-    }
-  });
+            setTimeout(() => {
+                findOpenPrForTestReview(page + 1);
+            }, GH_BW_PAUSE_PERIOD);
+        }
+    });
+}
 
+
+/**
+ * Sets the reviewer and creates the JIRA ticket for them.
+ *
+ * @param tech - see TECH
+ */
+function callUTReview(tech) {
+    // TODO: Set reviewer
+    // TODO: Create JIRA
 }
 
 /**
@@ -90,39 +91,44 @@ function findManualAutofix(page) {
  * @param prURL
  */
 function processPRfromIssue(prURL) {
-  var prUrlObj = gh(prURL);
-  var ghpr = client.pr(prUrlObj.repository, prUrlObj.filepath).conditional(
-      'ETAG');
+    let prUrlObj = gh(prURL);
+    let ghpr = client.pr(prUrlObj.repository, prUrlObj.filepath).conditional(
+        'ETAG');
 
-  ghpr.info((err, prData, headers) => {
-    if (prData && prData.commits > 1) {
-      ghpr.commits((err, commitData, headers) => {
-        var authors = "";
-
-        for (var i = 0; i < commitData.length; ++i) {
-          if (commitData[i].author ==undefined ||
-              commitData[i].author.login == undefined ||
-              commitData[i].author.login.localeCompare("codefix-service-user") == 0){
-            continue;
-          }
-          authors += commitData[i].author.login;
-          if (i < commitData.length - 1) {
-            authors += " ";
-          }
+    ghpr.files((error, files, headers) => {
+        if (error || !files){
+            console.warn("Missing files or error: %s", error.message);
+            return;
         }
 
-        var insight = prData.head.ref.split("-")[1];
-        var meta = [[prUrlObj.repo, prURL, insight, authors,
-          prData.commits - 1]];
-        var str = new CSV(meta, {header: false}).encode() + ",\n";
+        let eligible = false;
+        const regex = /.*test.*\.(java|cs)/i;
 
-        fs.appendFile('prs.csv', str,
-            (err) => {
-              if (err) {
-                throw err;
-              }
-            });
-      });
-    }
-  });
+        for (let i = 0; i < files.length && !eligible; ++i) {
+            const file = files[i];
+
+            let matches = file.filename.match(regex);
+
+            if (matches && matches.length > 1) {
+                console.log('PR: %s has test files: %s', prURL, matches[0]);
+                switch (matches[1]) {
+                    case 'cs':
+                        eligible = true;
+                        callUTReview(TECH.CS);
+                        break;
+
+                    case 'java':
+                        eligible = true;
+                        callUTReview(TECH.JAVA);
+                        break;
+
+                    case 'c':
+                    case 'cpp':
+                        eligible = true;
+                        callUTReview(TECH.CPP);
+                        break;
+                }
+            }
+        }
+    });
 }
